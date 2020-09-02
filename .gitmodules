@@ -1,0 +1,3 @@
+[submodule "rating_model"]
+	path = rating_model
+	url = https://github.com/riomat13/rating_model

@@ -1,0 +1,36 @@
+# python
+*.pyc
+__pycache__/
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# test
+.coverage
+
+# virtualenv
+.venv/
+
+# database
+*.db
+*.sqlite
+
+# logs/data
+*.log
+logs/
+data/
+
+# configuration files
+.env
+.env.*
+*.cfg
+
+# miscellaneous
+.project
+*.err
+*.out
+*.pid
+
+!amzn_review/data/
+!tests/data/

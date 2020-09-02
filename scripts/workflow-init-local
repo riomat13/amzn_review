@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# for airflow
+docker run --rm -d --name amzn_review_airflow \
+  -e POSTGRES_USER=${AIRFLOW_DB_USER} \
+  -e POSTGRES_PASSWORD=${AIRFLOW_DB_PASSWORD} \
+  -e POSTGRES_DB=${AIRFLOW_DB_NAME} \
+  -e PGDATA=/var/lib/postgresql/data/amzn_review/airflow \
+  -p ${AIRFLOW_DB_PORT}:5432 \
+  postgres
+
+# for database
+docker run --rm -d --name amzn_review_db \
+  -e POSTGRES_USER=${POSTGRES_USER} \
+  -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+  -e POSTGRES_DB=${POSTGRES_DB} \
+  -e PGDATA=/var/lib/postgresql/data/amzn_review/app \
+  -p ${POSTGRES_PORT}:5432 \
+  postgres
+
+# only for cache temporary state
+docker run --rm -d --name amzn_review_redis \
+  -e ALLOW_EMPTY_PASSWORD=yes \
+  -p ${REDIS_PORT}:6379 \
+  redis:6.0.6-alpine
+
+# initialize airflow database
+airflow initdb
+
+# create database for celery
+docker exec -ti amzn_review_airflow psql -U ${AIRFLOW_DB_USER} -d ${AIRFLOW_DB_NAME} -c 'CREATE DATABASE celery'

@@ -1,0 +1,12 @@
+{
+  "jsonpaths": [
+    "$['reviewerID']",
+    "$['asin']",
+    "$['reviewerName']",
+    "$['vote']",
+    "$['overall']",
+    "$['unixReviewTime']",
+    "$['reviewText']",
+    "$['summary']"
+  ]
+}

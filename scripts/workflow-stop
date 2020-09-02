@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# forcibly kill the process (any other good way to stop?)
+echo "Terminating Airflow..."
+
+DIR=${PWD}
+
+if [ -z $APP_HOME ]; then
+  if [ -f .env ]; then
+    source .env
+  else
+    cd "$(dirname "${BASH_SOURCE[0]}" )"/../ > /dev/null 2>&1
+    #cd "$(dirname "${BASH_SOURCE[0]}" )"/../ > /dev/null 2>&1
+    AIRFLOW_HOME=${PWD}/workflow
+  fi
+fi
+
+# terminate from process stored in pid file
+AIRFLOW_WEBSERVER_PID_FILE=${AIRFLOW_HOME}/airflow-webserver.pid
+
+if [ -f $AIRFLOW_WEBSERVER_PID_FILE ]; then
+  cat $AIRFLOW_WEBSERVER_PID_FILE | xargs kill -9
+  rm -f $AIRFLOW_WEBSERVER_PID_FILE
+fi
+
+AIRFLOW_WEBSERVER_MONITOR_PID_FILE=${AIRFLOW_HOME}/airflow-webserver-monitor.pid
+if [ -f $AIRFLOW_WEBSERVER_MONITOR_PID_FILE ]; then
+  cat $AIRFLOW_WEBSERVER_MONITOR_PID_FILE | xargs kill -9
+  rm -f $AIRFLOW_WEBSERVER_MONITOR_PID_FILE
+fi
+
+# terminate from process stored in pid file
+AIRFLOW_SCHEDULER_PID_FILE=${AIRFLOW_HOME}/airflow-scheduler.pid
+
+if [ -f $AIRFLOW_SCHEDULER_PID_FILE ]; then
+  pid=$(cat ${AIRFLOW_SCHEDULER_PID_FILE})
+
+  output=$(ps -p "$pid")
+  if [ "$?" -eq 0 ]; then
+    kill -9 $pid > /dev/null 2>&1
+  fi
+
+  rm -f $AIRFLOW_SCHEDULER_PID_FILE
+fi
+
+# kill rest of all schedulers forcibly
+PIDS=$(ps aux | grep "airflow scheduler" | grep -v grep | tr -s ' ' | cut -d ' ' -f 2)
+
+for pid in $PIDS; do
+  output=$(ps -p "$pid")
+  if [ "$?" -eq 0 ]; then
+    kill -9 $pid > /dev/null 2>&1
+  fi
+done
+
+cd ${DIR}

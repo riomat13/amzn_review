@@ -1,0 +1,30 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+coverage = "*"
+flake8 = "*"
+tox = "*"
+faker = "*"
+
+[packages]
+amzn-review = {editable = true, path = "."}
+apache-airflow = {extras = ["celery", "postgres"], version = "==1.10.12"}
+boto3 = "==1.14.36"
+botocore = "==1.17.36"
+celery = "*"
+cryptography = "==3.0"
+numpy = "==1.18.5"
+rating_model = {editable = true, path = "./rating_model"}
+redis = "3.5.3"
+requests = "==2.24.0"
+sentencepiece = "*"
+tensorflow = "==2.3.0"
+tokenizers = "*"
+tqdm = "==4.48.2"
+typing-extensions = "*"
+
+[requires]
+python_version = "3.8"
