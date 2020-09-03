@@ -27,7 +27,7 @@ class _DatabaseDSN(object):
 
 
 class Config(object):
-    MODE = 'PRODUCTION'
+    MODE = 'DEVELOPMENT'
 
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     LOG_DIR = os.path.join(ROOT_DIR, 'logs')
@@ -93,8 +93,22 @@ class Config(object):
 
     @classmethod
     def test_config(cls):
-        cls.MODE = 'TEST'
-        cls.LOG_LEVEL = 'ERROR'
+        if cls.MODE != 'TEST':
+            cls.MODE = 'TEST'
+            cls.LOG_LEVEL = 'ERROR'
+
+            # supress logs from tensorflow
+            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+            # set sqlite as primary database for test
+            os.environ['AIRFLOW__CORE__SQL_ALCHEMY_CONN'] = 'sqlite:////tmp/test.db'
+            os.environ['AIRFLOW__CORE__EXECUTOR'] = 'SequentialExecutor'
+            os.environ['AIRFLOW__CORE__LOGGING_LEVEL'] = 'ERROR'
+
+            from airflow.utils import db
+            print('Initializing sqlite db for test...')
+            db.initdb()
+
         return cls
 
     @classmethod
@@ -176,5 +190,3 @@ for dir_type in ('DATA_DIR', 'LOG_DIR', 'MODEL_DIR'):
     dirpath = getattr(Config, dir_type)
     if dirpath is not None and not os.path.isdir(dirpath):
         os.makedirs(dirpath)
-
-
