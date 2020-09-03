@@ -17,7 +17,7 @@ import random
 import shutil
 import time
 import threading
-from typing import List
+from typing import Callable, Coroutine, List
 
 from botocore.exceptions import ClientError
 
@@ -31,7 +31,7 @@ random.seed(1234)
 
 
 @dataclass(frozen=True)
-class _FileItem:
+class FileItem:
     category: str
     filepath: str
 
@@ -60,7 +60,7 @@ class MetadataUploader(object):
 
             try:
                 # use the same file name as an object name
-                resp = self.s3_client.put_object(
+                resp = self.client.put_object(
                     Body=metadata,
                     Bucket=self.bucket,
                     ContentEncoding='gzip',
@@ -141,7 +141,7 @@ class FileExtractor(object):
         files = glob.iglob(path)
 
         for f in files:
-            yield _FileItem(self.category, f)
+            yield FileItem(self.category, f)
 
             await asyncio.sleep(random.random() * self.max_interval)
 
@@ -189,101 +189,41 @@ class MultipleCategoryFileExtractor(object):
 class ReviewUploader(object):
     """Upload review data to storage."""
     def __init__(self,
-                 target: str,
                  group: int,
-                 mode: str,
-                 interval: float = 1.0,
-                 max_send: int = 0):
+                 handler: Callable,
+                 max_interval: float = 1.0):
         """Server to send review data.
 
         Args:
-            target: str
-                target path or bucket name to upload file objects
             group: int
-                number of groups to put items to this
-            mode: str
-                upload mode, either `local` or `aws`
-                if set to `aws`, upload data to S3 bucket
-            interval: float (default: 1.0)
-                interval to send in seconds
-                If this is set to 0, upload file to S3
-                immediately once received file.
-                This is an interval from the last time sending files.
-            max_send: int (default: 0)
-                if set as positive, send at most `max_send` items at once
-                no limit when it is set as less than and equal to 0
+                number of item groups
+            handler: function
+                data handler function
+                this function will take FileItem object as input argument
+            max_interval: float (default: 1.0)
+                max interval between each upload operation in seconds
 
         Raises:
             ValueError: raises when group is not positive
             ValueError: raises when interval is negative
-            ValueError: raises when mode is neither `local` nor `aws`
         """
         if group < 1:
             raise ValueError('`group` must be positive')
-        if interval < 0:
-            raise ValueError('`interval` must be non-negative')
-        if mode not in ('local', 'aws'):
-            raise ValueError('`mode` must be chosen from ("local", "aws")')
+        if max_interval < 0:
+            raise ValueError('`max_interval` must be non-negative')
 
         # only run in single process so synchronous Queue is enough
         self.rest = group
-        self.queue = Queue(maxsize=max_send)
+        self.queue = Queue(maxsize=100)
         self._lock = threading.RLock()
-        self.interval = interval
-        self.max_send = max_send
+        self.interval = max_interval
 
-        if mode == 'local':
-            self.path = target
-        if mode == 'aws':
-            self.bucket = target
-            self.s3_client = AWS.get_client('s3')
-        self._setup(mode)
+        self.handler = handler
 
     async def put(self, item):
-        """Put item to Queue."""
+        """Put item which will be uploaded to Queue."""
         with self._lock:
             await self.queue.put(item)
-
-    def _setup(self, mode):
-        if hasattr(self, 'upload'):
-            logger.warning('mode already set')
-            return
-
-        base_key = 'uploaded/reviews/{category}/{fname}'
-
-        if mode == 'aws':
-            def upload(item):
-                nonlocal base_key
-
-                fname = os.path.basename(item.filepath)
-
-                try:
-                    # use the same file name as an object name
-                    resp = self.s3_client.put_object(
-                        Body=load_json_content(item.filepath),
-                        Bucket=self.bucket,
-                        ContentEncoding='gzip',
-                        ContentType='application/json',
-                        Key=base_key.format(category=item.category,
-                                            fname=fname),
-                    )
-                    logger.info(f'Uploaded: {fname}')
-                except ClientError as e:
-                    logger.error(f'{e}: {fname}')
-
-        elif mode == 'local':
-            dirpath = os.path.join(Config.DATA_DIR, base_key)
-
-            def upload(item):
-                nonlocal dirpath
-
-                fname = os.path.basename(item.filepath)
-
-                with open(dirpath.format(category=item.category, fname=fname), 'wb') as f:
-                    logger.info(f'writing file: {item.filepath}')
-                    f.write(load_json_content(item.filepath))
-
-        self.upload = upload
 
     async def run(self) -> None:
         """Run server."""
@@ -305,22 +245,27 @@ class ReviewUploader(object):
                         return
                     continue
 
-                self.upload(item)
+                self.handler(item)
 
-            await asyncio.sleep(self.interval)
+            await asyncio.sleep(random.random() * self.interval)
 
 
 async def _run(uploader: ReviewUploader,
                categories: List[str],
                worker: int = 2,
                max_interval: float = 1.0) -> None:  # pragma: no cover
+
+    random.shuffle(categories)
+
+    # grouping categories to assign each worker
     group_size = (len(categories) + worker - 1) // worker
 
+    # if # of worker is greater than # of category, put all categories into one worker
     if not group_size:
         worker = 1
         group_size = len(categories)
 
-    # asynchronously put items from each file extractor
+    # asynchronously put items from each file extractor into internal Queue
     async def put_item(worker):
         nonlocal uploader
 
@@ -349,55 +294,107 @@ async def _run(uploader: ReviewUploader,
         await task
 
 
-async def run(categories: List[str], worker: int = 2, max_interval: float = 1.0) -> None:  # pragma: no cover
-    """Execute file object uploader for AWS S3 bucket."""
-    uploader = ReviewUploader(target=Config.AWS['S3_BUCKET'],
-                              group=worker,
-                              mode='aws',
-                              interval=max_interval,
-                              max_send=100)
+def _create_upload_coro(mode: str, worker: int = 2, max_interval: float = 1.0) -> Coroutine:
+    """Create upload couroutine.
 
-    await _run(uploader, categories, worker)
+    Args:
+        mode: str
+            upload mode, either `local`, `aws` or `db`
+            if set to `local`, upload data to local storage
+            if set to `aws`, upload data to S3 bucket
+            if set to `db`, upload data to database (not implemented)
+        worker: int (default: 2)
+        max_interval: float (default: 1.0)
+    """
+    base_key = 'uploaded/reviews/{category}/{fname}'
 
+    if mode == 'aws':
+        target = Config.AWS['S3_BUCKET']
+        client = AWS.get_client('s3')
 
-async def run_local(categories: List[str], worker: int = 2, max_interval: float = 1.0) -> None:  # pragma: no cover
-    """Execute file object uploader to local file system."""
-    uploader = ReviewUploader(target=Config.DATA_DIR,
-                              group=worker,
-                              mode='local',
-                              interval=max_interval,
-                              max_send=100)
+        def upload_file(item: FileItem) -> None:
+            """Upload file object to S3 bucket."""
+            nonlocal base_key
+            nonlocal client
 
-    for category in categories:
-        if not os.path.isdir(path := os.path.join(Config.DATA_DIR, 'uploaded', 'reviews', category)):
-            os.makedirs(path)
+            fname = os.path.basename(item.filepath)
 
-    await _run(uploader, categories, worker)
+            try:
+                # use the same file name as an object name
+                resp = client.put_object(
+                    Body=load_json_content(item.filepath),
+                    Bucket=target,
+                    ContentEncoding='gzip',
+                    ContentType='application/json',
+                    Key=base_key.format(category=item.category,
+                                        fname=fname),
+                )
+                logger.info(f'Uploaded: {fname}')
+            except ClientError as e:
+                logger.error(f'{e}: {fname}')
+
+    elif mode == 'local':
+        target = Config.DATA_DIR
+
+        # check if directory exists to upload data
+        for category in Config.DATA_CATEGORIES:
+            if not os.path.isdir(path := os.path.join(Config.DATA_DIR, 'uploaded', 'reviews', category)):
+                os.makedirs(path)
+
+        dirpath = os.path.join(Config.DATA_DIR, base_key)
+
+        def upload_file(item: FileItem) -> None:
+            """Upload file to local storage."""
+            nonlocal dirpath
+
+            fname = os.path.basename(item.filepath)
+
+            with open(dirpath.format(category=item.category, fname=fname), 'wb') as f:
+                logger.info(f'writing file: {item.filepath}')
+                f.write(load_json_content(item.filepath))
+
+    elif mode == 'db':
+        def upload_file(item: FileItem) -> None:
+            """Upload file data to database."""
+            pass
+
+        raise NotImplementedError()
+    else:
+        raise ValueError('`mode` must be chosen from ("local", "aws", "db")')
+
+    async def run() -> None:  # pragma: no cover
+        """Execute data uploading operation."""
+        nonlocal target
+        nonlocal mode
+
+        uploader = ReviewUploader(group=worker,
+                                  handler=upload_file,
+                                  max_interval=max_interval)
+
+        await _run(uploader, Config.DATA_CATEGORIES, worker)
+
+    return run()
 
 
 if __name__ == '__main__':
+    # TODO: add DB mode
     parser = argparse.ArgumentParser()
-    parser.add_argument('--local', action='store_true',
-                        help='upload data to local storage')
+    parser.add_argument('--mode', type=str, default='local',
+                        help='upload type ["local", "aws"] (default: "local")')
     parser.add_argument('--max-interval', type=float, default=1.0,
                         help='interval between upload in seconds(default: 1.0)')
 
     args = parser.parse_args()
 
+    logger.info(f'Running "{args.mode}" mode')
+    executor = _create_upload_coro(mode=args.mode,
+                                   worker=Config.DATA_UPLOADER_WORKER,
+                                   max_interval=args.max_interval)
+
     loop = asyncio.get_event_loop()
 
-    if args.local:
-        logger.info('Running "Local" mode')
-        run_fn = run_local
-    else:
-        run_fn = run
-
     try:
-        loop.run_until_complete(
-            run_fn(Config.DATA_CATEGORIES,
-                   worker=Config.DATA_UPLOADER_WORKER,
-                   max_interval=args.max_interval)
-        )
+        loop.run_until_complete(executor)
     except KeyboardInterrupt:
         print('Terminating tasks...')
         tasks = asyncio.all_tasks(loop=loop)

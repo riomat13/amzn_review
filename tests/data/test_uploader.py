@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import asyncio
+import collections
 import gzip
 import json
 
@@ -14,12 +15,14 @@ from settings import Config
 Config.test_config()
 
 from amzn_review.data.uploader import (
-    _FileItem,
+    FileItem,
     load_json_content,
     MetadataUploader,
     FileExtractor,
     MultipleCategoryFileExtractor,
-    ReviewUploader
+    ReviewUploader,
+    _run,
+    _create_upload_coro
 )
 
 
@@ -118,74 +121,153 @@ class MultipleCategoryFileExtractorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(res), 30)
 
 
-@patch('amzn_review.data.uploader.load_json_content', side_effect=lambda x: x)
 class ReviewUploaderTest(unittest.IsolatedAsyncioTestCase):
 
     # test with 2 groups
     targets = (
-        _FileItem('test1', 'data/test1/1.json'),
-        _FileItem('test1', 'data/test1/2.json'),
-        _FileItem('test1', 'data/test1/3.json'),
+        FileItem('test1', 'data/test1/1.json'),
+        FileItem('test1', 'data/test1/2.json'),
+        FileItem('test1', 'data/test1/3.json'),
         None,
-        _FileItem('test2', 'data/test2/4.json'),
-        _FileItem('test2', 'data/test2/5.json'),
+        FileItem('test2', 'data/test2/4.json'),
+        FileItem('test2', 'data/test2/5.json'),
         None
     )
 
     @patch('amzn_review.data.uploader.AWS.get_client')
     def test_basic_type(self, *_):
+        fn = lambda: None
         # check group
         with self.assertRaises(ValueError):
-            ReviewUploader('test', 0, 'local', 1, 1)
+            ReviewUploader(0, fn, 1)
 
         # check interval
         with self.assertRaises(ValueError):
-            ReviewUploader('test', 2, 'aws', -1, 1)
+            ReviewUploader(2, fn, -1)
 
-        # check invalid mode
-        with self.assertRaises(ValueError):
-            ReviewUploader('test', 2, 'wrong', 1, 1)
+    async def test_uploader_is_called(self):
+        counter = _CollectData()
+
+        upload_fn = lambda f: counter.collect(f.filepath)
+
+        uploader = ReviewUploader(2, upload_fn, 0.0)
+
+        for i, f in enumerate(self.targets):
+            await uploader.put(f)
+
+        await uploader.run()
+
+        # check if bodies are taken from appropriate files
+        target_items = tuple(t.filepath for t in self.targets if t is not None)
+
+        self.assertEqual(counter.count(), len(target_items))
+        self.assertTrue(
+            counter.is_match(target_items)
+        )
+
+
+class RunUploadCoroutineTest(unittest.IsolatedAsyncioTestCase):
+
+    @patch('amzn_review.data.uploader.MultipleCategoryFileExtractor')
+    async def test_run_coroutine(self, Extractor):
+
+        class MockWorker:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def generate(self):
+                for i in range(10):
+                    yield FileItem(i, i)
+
+        class MockUploader(_CollectData):
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+                self.called = 0
+                self.n_workers = 0
+
+            async def put(self, item):
+                if item is None:
+                    self.n_workers += 1
+                else:
+                    self.collect(item.filepath)
+                await asyncio.sleep(0.0)
+
+            async def run(self):
+                self.called += 1
+                await asyncio.sleep(0.0)
+
+        Extractor.side_effect = MockWorker
+
+        uploader = MockUploader()
+
+        n_workers = 4
+        await _run(uploader, list(range(n_workers)), worker=n_workers)
+
+        self.assertEqual(uploader.called, 1)
+        self.assertEqual(uploader.n_workers, n_workers)
+        self.assertEqual(uploader.count(), 10 * n_workers)
+
+        for i, (item, cnt) in enumerate(collections.Counter(uploader.items).items()):
+            self.assertEqual(item, i)
+            self.assertEqual(cnt, n_workers)
+
+
+@patch('amzn_review.data.uploader.ReviewUploader')
+@patch('amzn_review.data.uploader._run')
+class RunUploadCoroutineTest(unittest.IsolatedAsyncioTestCase):
+
+    data = {
+        'test': 'test_content'
+    }
+
+    def _get_handler(self, uploader):
+        return uploader.call_args[1]['handler']
 
     @patch('builtins.open')
-    async def test_sending_data_to_local_storage(self, mock_open, load_json):
-        uploader = ReviewUploader('test', 2, mode='local', interval=0, max_send=0)
+    async def test_uploade_local_storage(self, mock_open, mock_run, mock_uploader):
+        coro = _create_upload_coro('local', 2, max_interval=0)
+        await coro
 
-        for i, f in enumerate(self.targets):
-            await uploader.put(f)
+        mock_run.assert_called_once()
 
-        counter = _CollectData()
-        mock_open.return_value.__enter__.return_value.write.side_effect = counter.collect
+        handler = self._get_handler(mock_uploader)
 
-        await uploader.run()
+        item = FileItem('fileitem', 'testpath')
 
-        # check if bodies are taken from appropriate files
-        target_items = tuple(t.filepath for t in self.targets if t is not None)
+        # check if handler open file and write data in local storage
+        with patch('amzn_review.data.uploader.load_json_content', return_value=self.data):
+            handler(item)
 
-        self.assertEqual(counter.count(), len(target_items))
-        self.assertTrue(
-            counter.is_match(target_items)
-        )
+        mock_open.assert_called_once()
+
+        # check if data is properly written to file
+        write = mock_open.return_value.__enter__.return_value.write
+        write.assert_called_once_with(self.data)
 
     @patch('amzn_review.data.uploader.AWS.get_client')
-    async def test_sending_data_to_s3(self, boto3client, load_json):
+    async def test_upload_to_s3(self, boto3client, mock_run, mock_uploader):
         """check data is sent via boto3 client."""
-        uploader = ReviewUploader('test', 2, mode='aws', interval=0, max_send=0)
+        coro = _create_upload_coro('aws', 2, max_interval=0)
+        await coro
 
-        for i, f in enumerate(self.targets):
-            await uploader.put(f)
+        mock_run.assert_called_once()
 
-        counter = _CollectData(key='Body')
-        boto3client.return_value.put_object.side_effect = counter.collect
+        handler = self._get_handler(mock_uploader)
 
-        await uploader.run()
+        item = FileItem('fileitem', 'testpath')
 
-        # check if bodies are taken from appropriate files
-        target_items = tuple(t.filepath for t in self.targets if t is not None)
+        # check if handler upload data to S3 via boto3 client
+        with patch('amzn_review.data.uploader.load_json_content', return_value=self.data):
+            handler(item)
 
-        self.assertEqual(counter.count(), len(target_items))
-        self.assertTrue(
-            counter.is_match(target_items)
-        )
+        boto3client.assert_called_once()
+        put_obj = boto3client.return_value.put_object
+        put_obj.assert_called_once()
+
+        # check if target data is used to upload
+        self.assertEqual(put_obj.call_args[1]['Body'], self.data)
 
 
 if __name__ == '__main__':

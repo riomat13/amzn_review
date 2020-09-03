@@ -39,13 +39,13 @@ def _handle_data_uploader(args):
     if args.type == 'run':
         if args.local:
             print('Data uploader in local')
-            command = ['pipenv', 'run', 'python', 'amzn_review/data/uploader.py', '--local']
+            command = ['pipenv', 'run', 'python', 'amzn_review/data/uploader.py', '--mode', 'local']
 
             with open(os.path.join(Config.LOG_DIR, 'main.uploader.run_local.log'), 'a') as f:
                 proc = subprocess.Popen(command, stdout=f, stdin=f)
         else:
             print('Data uploader to S3')
-            command = ['pipenv', 'run', 'python', 'amzn_review/data/uploader.py']
+            command = ['pipenv', 'run', 'python', 'amzn_review/data/uploader.py', '--mode', 'aws']
 
             with open(os.path.join(Config.LOG_DIR, 'main.uploader.run.log'), 'a') as f:
                 proc = subprocess.Popen(command, stdout=f, stdin=f)
